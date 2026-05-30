@@ -1,8 +1,8 @@
 import datetime
 import math
 import os
-import time
 import random
+import time
 
 import cv2
 import numpy as np
@@ -10,6 +10,7 @@ import torch
 import torch.autograd as autograd
 from torch import nn, optim
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from ..datahandler import get_dataset_class
 from ..loss import Loss
@@ -18,7 +19,7 @@ from ..util.dnd_submission.dnd_denoise import denoise_srgb
 from ..util.dnd_submission.pytorch_wrapper import pytorch_denoiser
 from ..util.file_manager import FileManager
 from ..util.logger import Logger
-from ..util.util import (human_format, imread_tensor, np2tensor,
+from ..util.util import (human_format, imread_tensor,
                          pixel_shuffle_down_sampling,
                          pixel_shuffle_up_sampling, psnr, rot_hflip_img, ssim,
                          tensor2np)
@@ -47,7 +48,7 @@ class BaseTrainer():
 
     #----------------------------#
     #    Train/Test functions    #
-    #----------------------------#   
+    #----------------------------#
     def __init__(self, cfg):
         self.session_name = cfg['session_name']
 
@@ -56,13 +57,13 @@ class BaseTrainer():
         # get file manager and logger class
         self.file_manager = FileManager(self.session_name)
         self.logger = Logger()
-        
+
         self.cfg = cfg
         self.train_cfg = cfg['training']
         self.val_cfg   = cfg['validation']
         self.test_cfg  = cfg['test']
         self.ckpt_cfg  = cfg['checkpoint']
-        
+
         self.setup_determinism()
 
     def setup_determinism(self, seed=7777):
@@ -71,7 +72,7 @@ class BaseTrainer():
         torch.manual_seed(seed)
         np.random.seed(seed)
         random.seed(seed)
-        
+
     def _log_configs(self, config, prefix=""):
         for key, value in config.items():
             if isinstance(value, dict):
@@ -93,12 +94,8 @@ class BaseTrainer():
             self._before_epoch()
             self._run_epoch()
             self._after_epoch()
-        
+
         self._after_train()
-        
-    def set_device(self, device):
-        assert isinstance(device, str)
-        self.device = [int(i) for i in device.split(',')] 
 
     def _warmup(self):
         self._set_status('warmup')
@@ -127,7 +124,7 @@ class BaseTrainer():
 
         # load checkpoint file
         ckpt_epoch = self._find_last_epoch() if self.cfg['ckpt_epoch'] == -1 else self.cfg['ckpt_epoch']
-        ckpt_name  = self.cfg['pretrained'] if self.cfg['pretrained'] is not None else None
+        ckpt_name  = self.cfg.get('pretrained') if self.cfg.get('pretrained') is not None else None
         self.load_checkpoint(ckpt_epoch, name=ckpt_name)
         self.epoch = self.cfg['ckpt_epoch'] # for print or saving file name.
 
@@ -136,14 +133,11 @@ class BaseTrainer():
             self.test_dataloader = self._set_dataloader(self.test_cfg, batch_size=1, shuffle=False, num_workers=self.cfg['thread'], drop_last=False)
 
         # wrapping and device setting
-        assert len(self.device) > 0, "There is not available device."
-        if len(self.device) > 1:
+        if self.cfg.get('gpu') != 'None':
             # model to GPU
-            self.model = {key: nn.DataParallel(self.module[key], device_ids=self.device).cuda() for key in self.module}
+            self.model = {key: nn.DataParallel(self.module[key]).cuda() for key in self.module}
         else:
-            os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"  # Arrange GPU devices starting from 0
-            os.environ["CUDA_VISIBLE_DEVICES"]= str(self.device[0])
-            self.model = {key: self.module[key].cuda() for key in self.module}
+            self.model = {key: nn.DataParallel(self.module[key]) for key in self.module}
 
         # evaluation mode and set status
         self._eval_mode()
@@ -154,7 +148,7 @@ class BaseTrainer():
 
         # set denoiser
         self._set_denoiser()
-        
+
         # wrapping denoiser w/ self_ensemble
         if self.cfg['self_en']:
             # (warning) self_ensemble cannot be applied with multi-input model
@@ -166,7 +160,7 @@ class BaseTrainer():
             # (warning) self_ensemble cannot be applied with multi-input model
             denoiser_fn = self.denoiser
             self.denoiser = lambda *input_data: self.crop_test(denoiser_fn, *input_data, size=self.cfg['test']['crop'])
-            
+
     def _before_train(self):
         # cudnn
         torch.backends.cudnn.benchmark = False
@@ -175,11 +169,11 @@ class BaseTrainer():
         self.module = self._set_module()
 
         # training dataset loader
-        self.train_dataloader = self._set_dataloader(self.train_cfg, batch_size=self.train_cfg['batch_size'], shuffle=True, drop_last=True, num_workers=0)
+        self.train_dataloader = self._set_dataloader(self.train_cfg, batch_size=self.train_cfg['batch_size'], shuffle=True, drop_last=True, num_workers=self.cfg['thread'])
 
         # validation dataset loader
         if self.val_cfg['val']:
-            self.val_dataloader = self._set_dataloader(self.val_cfg, batch_size=1, shuffle=False, drop_last=False, num_workers=0)
+            self.val_dataloader = self._set_dataloader(self.val_cfg, batch_size=1, shuffle=False, drop_last=False, num_workers=self.cfg['thread'])
 
         # other configuration
         self.max_epoch = self.train_cfg['max_epoch']
@@ -212,12 +206,14 @@ class BaseTrainer():
             # logger initialization
             self.logger = Logger((self.max_epoch, self.max_iter), log_dir=self.file_manager.get_dir(''), log_file_option='w')
 
+        # tensorboard
+        tboard_time = datetime.datetime.now().strftime('%m-%d-%H-%M')
+        self.tboard = SummaryWriter(log_dir=self.file_manager.get_dir('tboard/%s'%tboard_time))
+
         # wrapping and device setting
-        assert len(self.device) > 0, "There is not available device."
-        if len(self.device) > 1:
-            os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"  # Arrange GPU devices starting from 0
+        if self.cfg.get('gpu') != 'None':
             # model to GPU
-            self.model = {key: nn.DataParallel(self.module[key], device_ids=self.device).cuda() for key in self.module}
+            self.model = {key: nn.DataParallel(self.module[key]).cuda() for key in self.module}
             # optimizer to GPU
             for optim in self.optimizer.values():
                 for state in optim.state.values():
@@ -225,16 +221,13 @@ class BaseTrainer():
                         if isinstance(v, torch.Tensor):
                             state[k] = v.cuda()
         else:
-            os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"  # Arrange GPU devices starting from 0
-            os.environ["CUDA_VISIBLE_DEVICES"]= str(self.device[0])
-            self.model = {key: self.module[key].cuda() for key in self.module}
-            
-        # start message
+            self.model = {key: nn.DataParallel(self.module[key]) for key in self.module}
 
-        #self.logger.info(self.summary())
+        # start message
+        self.logger.info(self.summary())
         self.logger.start((self.epoch-1, 0))
         self.logger.highlight(self.logger.get_start_msg())
-        self._log_configs(self.cfg.__dict__, "")
+        self._log_configs(self.cfg.config, "")
 
     def _after_train(self):
         # finish message
@@ -278,17 +271,13 @@ class BaseTrainer():
         # get data (data should be dictionary of Tensors)
         data = {}
         for key in self.train_dataloader_iter:
-            try:
-                data[key] = next(self.train_dataloader_iter[key])
-            except StopIteration:
-                self.train_dataloader_iter[key] = iter(self.train_dataloader[key])
-                data[key] = next(self.train_dataloader_iter[key])
+            data[key] = next(self.train_dataloader_iter[key])
 
         # to device
-        if self.cfg['gpu'] != 'None':
+        if self.cfg.get('gpu') != 'None':
             for dataset_key in data:
                 for key in data[dataset_key]:
-                    if key in ['syn_noisy', 'real_noisy', 'clean', 'noisy']:
+                    if isinstance(data[dataset_key][key], torch.Tensor):
                         data[dataset_key][key] = data[dataset_key][key].cuda()
 
         # forward, cal losses, backward)
@@ -306,7 +295,7 @@ class BaseTrainer():
 
         # zero grad
         for opt in self.optimizer.values():
-            opt.zero_grad(set_to_none=True) 
+            opt.zero_grad(set_to_none=True)
 
         # save losses and tmp_info
         for key in losses:
@@ -333,7 +322,7 @@ class BaseTrainer():
         # print progress
         self.logger.print_prog_msg((self.epoch-1, self.iter-1))
 
-    def test_dataloader_process(self, dataloader, add_con=0., floor=False, img_save=True, img_save_path=None, info=True):
+    def test_dataloader_process(self, dataloader, add_con=0., floor=False, img_save=True, img_save_path=None, info=True, norm_factor=1.0):
         '''
         do test or evaluation process for each dataloader
         include following steps:
@@ -347,6 +336,7 @@ class BaseTrainer():
             img_save : whether to save denoised and clean images.
             img_save_path (optional) : path to save denoised images.
             info (optional) : whether to print info.
+            norm_factor : denormalization factor (e.g. 65535.0 for uint16, 1.0 for no change)
         Returns:
             psnr : total PSNR score of dataloaer results or None (if clean image is not available)
             ssim : total SSIM score of dataloder results or None (if clean image is not available)
@@ -360,13 +350,21 @@ class BaseTrainer():
         count = 0
         for idx, data in enumerate(dataloader):
             # to device
-            if self.cfg['gpu'] != 'None':
+            if self.cfg.get('gpu') != 'None':
                 for key in data:
-                    data[key] = data[key].cuda()
+                    if isinstance(data[key], torch.Tensor):
+                        data[key] = data[key].cuda()
+
+            # per-image normalization factor (from dataset _load_data), force to Python float
+            img_norm_factor = float(data.get('norm_factor', norm_factor))
 
             # forward
             input_data = [data[arg] for arg in self.cfg['model_input']]
             denoised_image = self.denoiser(*input_data)
+
+            # denormalize (e.g. [0,1] -> original range)
+            if img_norm_factor != 1.0:
+                denoised_image = denoised_image * img_norm_factor
 
             # add constant and floor (if floor is on)
             denoised_image += add_con
@@ -383,23 +381,35 @@ class BaseTrainer():
 
             # image save
             if img_save:
+                # select save method based on norm_factor
+                use_denorm_save = img_norm_factor != 1.0
+                if use_denorm_save:
+                    save_fn = lambda dir_name, file_name, img: self.file_manager.save_img_tensor_denorm(dir_name, file_name, img, img_norm_factor)
+                else:
+                    save_fn = self.file_manager.save_img_tensor
+
                 # to cpu
                 if 'clean' in data:
                     clean_img = data['clean'].squeeze(0).cpu()
+                    if img_norm_factor != 1.0:
+                        clean_img = clean_img * img_norm_factor
                 if 'real_noisy' in self.cfg['model_input']: noisy_img = data['real_noisy']
                 elif 'syn_noisy' in self.cfg['model_input']: noisy_img = data['syn_noisy']
                 elif 'noisy' in self.cfg['model_input']: noisy_img = data['noisy']
                 else: noisy_img = None
-                if noisy_img is not None: noisy_img = noisy_img.squeeze(0).cpu()
+                if noisy_img is not None:
+                    noisy_img = noisy_img.squeeze(0).cpu()
+                    if img_norm_factor != 1.0:
+                        noisy_img = noisy_img * img_norm_factor
                 denoi_img = denoised_image.squeeze(0).cpu()
 
                 # write psnr value on file name
                 denoi_name = '%04d_DN_%.2f'%(idx, psnr_value) if 'clean' in data else '%04d_DN'%idx
 
                 # imwrite
-                if 'clean' in data:         self.file_manager.save_img_tensor(img_save_path, '%04d_CL'%idx, clean_img)
-                if noisy_img is not None: self.file_manager.save_img_tensor(img_save_path, '%04d_N'%idx, noisy_img)
-                self.file_manager.save_img_tensor(img_save_path, denoi_name, denoi_img)
+                if 'clean' in data:         save_fn(img_save_path, '%04d_CL'%idx, clean_img)
+                if noisy_img is not None: save_fn(img_save_path, '%04d_N'%idx, noisy_img)
+                save_fn(img_save_path, denoi_name, denoi_img)
 
             # procedure log msg
             if info:
@@ -424,16 +434,39 @@ class BaseTrainer():
         '''
         Inference a single image.
         '''
-        # load image
-        noisy = np2tensor(cv2.imread(image_dir))
-        noisy = noisy.unsqueeze(0).float()
+        # load image (preserve original bit depth)
+        img = cv2.imread(image_dir, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise RuntimeError('failed to load image: %s' % image_dir)
+
+        # auto-detect bit depth from pixel values
+        norm_factor = 255.0 if img.max() <= 255 else 65535.0
+
+        # handle grayscale or color
+        if img.ndim == 2:
+            img = np.expand_dims(img, axis=0)  # (h,w) -> (1,h,w)
+        elif img.ndim == 3:
+            img = np.transpose(np.flip(img, axis=2), (2, 0, 1))  # BGR->RGB, (h,w,c)->(c,h,w)
+        else:
+            raise RuntimeError('unexpected image ndim: %d' % img.ndim)
+
+        noisy = torch.from_numpy(np.ascontiguousarray(img.astype(np.float32)))
+        noisy = noisy.unsqueeze(0)  # add batch dim
+
+        # normalize (e.g. [0,65535] -> [0,1] for uint16, [0,255] -> [0,1] for uint8)
+        if norm_factor != 1.0:
+            noisy = noisy / norm_factor
 
         # to device
-        if self.cfg['gpu'] != 'None':
+        if self.cfg.get('gpu') != 'None':
             noisy = noisy.cuda()
 
         # forward
         denoised = self.denoiser(noisy)
+
+        # denormalize (e.g. [0,1] -> [0,65535] for uint16)
+        if norm_factor != 1.0:
+            denoised = denoised * norm_factor
 
         # post-process
         denoised += self.test_cfg['add_con']
@@ -441,8 +474,14 @@ class BaseTrainer():
 
         # save image
         denoised = tensor2np(denoised)
+        if norm_factor != 1.0:
+            # use norm_factor to determine bit depth instead of guessing from pixel values
+            if norm_factor <= 255.0:
+                denoised = np.clip(np.round(denoised), 0, 255).astype(np.uint8)
+            else:
+                denoised = np.clip(np.round(denoised), 0, 65535).astype(np.uint16)
         denoised = denoised.squeeze(0)
-        
+
         name = image_dir.split('/')[-1].split('.')[0]
         cv2.imwrite(os.path.join(save_dir, name+'_DN.png'), denoised)
 
@@ -461,7 +500,7 @@ class BaseTrainer():
         '''
         Benchmarking DND dataset.
         '''
-        # make directories for .mat & image saving 
+        # make directories for .mat & image saving
         self.file_manager.make_dir(img_save_path)
         self.file_manager.make_dir(img_save_path + '/mat')
         if self.test_cfg['save_image']: self.file_manager.make_dir(img_save_path + '/img')
@@ -470,7 +509,7 @@ class BaseTrainer():
             noisy = 255 * torch.from_numpy(Inoisy)
 
             # to device
-            if self.cfg['gpu'] != 'None':
+            if self.cfg.get('gpu') != 'None':
                 noisy = noisy.cuda()
 
             noisy = autograd.Variable(noisy)
@@ -490,7 +529,7 @@ class BaseTrainer():
             denoised = np.transpose(denoised, [1,2,0])
 
             # image save
-            if self.test_cfg['save_image']:
+            if self.test_cfg['save_image'] and False:
                 self.file_manager.save_img_numpy(img_save_path+'/img', '%02d_%02d_N'%(idx, kidx),  255*Inoisy)
                 self.file_manager.save_img_numpy(img_save_path+'/img', '%02d_%02d_DN'%(idx, kidx), denoised)
 
@@ -500,19 +539,14 @@ class BaseTrainer():
 
         bundle_submissions_srgb(self.file_manager.get_dir(img_save_path+'/mat'))
 
-        # info 
+        # info
         self.logger.val('[%s] Done!'%self.status)
 
     def _set_denoiser(self):
-        if len(self.device) > 1:
-            module = self.model['denoiser'].module
+        if hasattr(self.model['denoiser'].module, 'denoise'):
+            self.denoiser = self.model['denoiser'].module.denoise
         else:
-            module = self.model['denoiser']
-            
-        if hasattr(module, 'denoise'):
-            self.denoiser = module.denoise
-        else:
-            self.denoiser = module
+            self.denoiser = self.model['denoiser'].module
 
     @torch.no_grad()
     def crop_test(self, fn, x, size=512, overlap=0):
@@ -527,7 +561,7 @@ class BaseTrainer():
                 end_j = min(j+size, w)
                 x_crop = x[...,i:end_i,j:end_j]
                 denoised_crop = fn(x_crop)
-                
+
                 start_i = overlap if i != 0 else 0
                 start_j = overlap if j != 0 else 0
 
@@ -556,7 +590,7 @@ class BaseTrainer():
 
     #----------------------------#
     #      Utility functions     #
-    #----------------------------# 
+    #----------------------------#
     def print_loss(self):
         temporal_loss = 0.
         for key in self.loss_dict:
@@ -572,11 +606,13 @@ class BaseTrainer():
         # print losses
         avg_loss = np.mean(self.loss_log)
         loss_out_str += 'avg_100 : %.3f ∣ '%(avg_loss)
+        self.tboard.add_scalar('loss/avg_100', avg_loss, global_iter)
 
         for key in self.loss_dict:
             if key != 'count':
                 loss = self.loss_dict[key]/self.loss_dict['count']
                 loss_out_str += '%s : %.3f ∣ '%(key, loss)
+                self.tboard.add_scalar('loss/%s'%key, loss, global_iter)
                 self.loss_dict[key] = 0.
 
         # print temporal information
@@ -593,16 +629,10 @@ class BaseTrainer():
 
     def save_checkpoint(self):
         checkpoint_name = self._checkpoint_name(self.epoch)
-        if len(self.device) > 1:
-            torch.save({'epoch': self.epoch,
-                        'model_weight': {key:self.model[key].module.state_dict() for key in self.model},
-                        'optimizer_weight': {key:self.optimizer[key].state_dict() for key in self.optimizer}},
-                        os.path.join(self.file_manager.get_dir(self.checkpoint_folder), checkpoint_name))
-        else:
-            torch.save({'epoch': self.epoch,
-                        'model_weight': {key:self.model[key].state_dict() for key in self.model},
-                        'optimizer_weight': {key:self.optimizer[key].state_dict() for key in self.optimizer}},
-                        os.path.join(self.file_manager.get_dir(self.checkpoint_folder), checkpoint_name))
+        torch.save({'epoch': self.epoch,
+                    'model_weight': {key:self.model[key].module.state_dict() for key in self.model},
+                    'optimizer_weight': {key:self.optimizer[key].state_dict() for key in self.optimizer}},
+                    os.path.join(self.file_manager.get_dir(self.checkpoint_folder), checkpoint_name))
 
     def load_checkpoint(self, load_epoch=0, name=None):
         if name is None:
@@ -613,10 +643,10 @@ class BaseTrainer():
         else:
             # load from global checkpoint folder
             file_name = os.path.join('./ckpt', name)
-        
+
         # check file exist
         assert os.path.isfile(file_name), 'there is no checkpoint: %s'%file_name
- 
+
         # load checkpoint (epoch, model_weight, optimizer_weight)
         saved_checkpoint = torch.load(file_name)
         self.epoch = saved_checkpoint['epoch']
@@ -751,7 +781,7 @@ class BaseTrainer():
             # get information about architecture and parameter number
             summary += '[%s] paramters: %s -->'%(k, human_format(param_num)) + '\n'
             summary += str(v) + '\n\n'
-        
+
         # optim
 
         # Hardware

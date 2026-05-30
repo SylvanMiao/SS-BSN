@@ -7,15 +7,19 @@ class ConfigParser:
         with open(cfg_file) as f:
             self.config = yaml.load(f, Loader=yaml.FullLoader)
 
-        # load argument
+        # load argument (only override yaml if explicitly given, not default None)
         for arg in args.__dict__:
-            self.config[arg] = args.__dict__[arg]
+            if args.__dict__[arg] is not None:
+                self.config[arg] = args.__dict__[arg]
 
         # string None handing
         self.convert_None(self.config)
 
     def __getitem__(self, name):
         return self.config[name]
+
+    def get(self, name, default=None):
+        return self.config.get(name, default)
 
     def convert_None(self, d):
         for key in d:
@@ -30,7 +34,7 @@ if __name__ == "__main__":
     args.add_argument('-c', '--config', default=None, type=str)
     args.add_argument('-d', '--device', default=None, type=str)
     args.add_argument('-r', '--resume', action='store_true')
-    
+
     args = args.parse_args()
 
     args.config = "./conf/resnet_cfg.yaml"

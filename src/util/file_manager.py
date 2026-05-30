@@ -18,14 +18,14 @@ class FileManager:
         os.makedirs(os.path.join(self.output_folder, self.session_name), exist_ok=True)
 
         # mkdir
-        for directory in ['checkpoint', 'img']:
+        for directory in ['checkpoint', 'img', 'tboard']:
             self.make_dir(directory)
 
     def is_dir_exist(self, dir_name:str) -> bool:
         return os.path.isdir(os.path.join(self.output_folder, self.session_name, dir_name))
 
     def make_dir(self, dir_name:str) -> str:
-        os.makedirs(os.path.join(self.output_folder, self.session_name, dir_name), exist_ok=True) 
+        os.makedirs(os.path.join(self.output_folder, self.session_name, dir_name), exist_ok=True)
 
     def get_dir(self, dir_name:str) -> str:
         # -> './output/<session_name>/dir_name'
@@ -34,10 +34,20 @@ class FileManager:
     def save_img_tensor(self, dir_name:str, file_name:str, img:torch.Tensor, ext='png'):
         self.save_img_numpy(dir_name, file_name, tensor2np(img), ext)
 
+    def save_img_tensor_denorm(self, dir_name:str, file_name:str, img:torch.Tensor, norm_factor:float=1.0, ext='png'):
+        """Save a denormalized float32 tensor: use norm_factor to determine uint8 vs uint16 instead of guessing from pixel values."""
+        img = tensor2np(img)
+        if norm_factor <= 255.0:
+            # 8-bit range -> save as uint8
+            img = np.clip(np.round(img), 0, 255).astype(np.uint8)
+        else:
+            # 16-bit range -> save as uint16
+            img = np.clip(np.round(img), 0, 65535).astype(np.uint16)
+        self.save_img_numpy(dir_name, file_name, img, ext)
+
     def save_img_numpy(self, dir_name:str, file_name:str, img:np.array, ext='png'):
         file_dir_name = os.path.join(self.get_dir(dir_name), '%s.%s'%(file_name, ext))
         if np.shape(img)[2] == 1:
             cv2.imwrite(file_dir_name, np.squeeze(img, 2))
         else:
             cv2.imwrite(file_dir_name, img)
-    

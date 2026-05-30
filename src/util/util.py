@@ -10,13 +10,13 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 def np2tensor(n:np.array):
     '''
     transform numpy array (image) to torch Tensor
-    BGR -> RGB
-    (h,w,c) -> (c,h,w)
+    gray: (h,w) -> (1,h,w)
+    BGR -> RGB: (h,w,c) -> (c,h,w)
     '''
-    # gray
+    # gray: (h,w) -> (1,h,w)
     if len(n.shape) == 2:
-        return torch.from_numpy(np.ascontiguousarray(np.transpose(n, (2,0,1))))
-    # RGB -> BGR
+        return torch.from_numpy(np.ascontiguousarray(n)).unsqueeze(0)
+    # BGR -> RGB: (h,w,c) -> (c,h,w)
     elif len(n.shape) == 3:
         return torch.from_numpy(np.ascontiguousarray(np.transpose(np.flip(n, axis=2), (2,0,1))))
     else:
@@ -25,18 +25,21 @@ def np2tensor(n:np.array):
 def tensor2np(t:torch.Tensor):
     '''
     transform torch Tensor to numpy having opencv image form.
-    RGB -> BGR
-    (c,h,w) -> (h,w,c)
+    gray: (h,w) or (1,h,w) -> (h,w) or (h,w,1)
+    RGB -> BGR: (c,h,w) -> (h,w,c)
     '''
     t = t.cpu().detach()
 
-    # gray
+    # gray (h,w)
     if len(t.shape) == 2:
-        return t.permute(1,2,0).numpy()
-    # RGB -> BGR
+        return t.numpy()
+    # gray (1,h,w) -> (h,w,1), or RGB (3,h,w) -> (h,w,3) with BGR flip
     elif len(t.shape) == 3:
-        return np.flip(t.permute(1,2,0).numpy(), axis=2)
-    # image batch
+        if t.shape[0] == 1:
+            return t.permute(1,2,0).numpy()
+        else:
+            return np.flip(t.permute(1,2,0).numpy(), axis=2)
+    # image batch (b,c,h,w)
     elif len(t.shape) == 4:
         return np.flip(t.permute(0,2,3,1).numpy(), axis=3)
     else:
@@ -50,37 +53,37 @@ def imread_tensor(name='test'):
 
 def rot_hflip_img(img:torch.Tensor, rot_times:int=0, hflip:int=0):
     '''
-    rotate '90 x times degree' & horizontal flip image 
+    rotate '90 x times degree' & horizontal flip image
     (shape of img: b,c,h,w or c,h,w)
     '''
     b=0 if len(img.shape)==3 else 1
     # no flip
     if hflip % 2 == 0:
         # 0 degrees
-        if rot_times % 4 == 0:    
+        if rot_times % 4 == 0:
             return img
         # 90 degrees
-        elif rot_times % 4 == 1:  
+        elif rot_times % 4 == 1:
             return img.flip(b+1).transpose(b+1,b+2)
         # 180 degrees
-        elif rot_times % 4 == 2:  
+        elif rot_times % 4 == 2:
             return img.flip(b+2).flip(b+1)
         # 270 degrees
-        else:               
+        else:
             return img.flip(b+2).transpose(b+1,b+2)
     # horizontal flip
     else:
         # 0 degrees
-        if rot_times % 4 == 0:    
+        if rot_times % 4 == 0:
             return img.flip(b+2)
         # 90 degrees
-        elif rot_times % 4 == 1:  
+        elif rot_times % 4 == 1:
             return img.flip(b+1).flip(b+2).transpose(b+1,b+2)
         # 180 degrees
-        elif rot_times % 4 == 2:  
+        elif rot_times % 4 == 2:
             return img.flip(b+1)
         # 270 degrees
-        else:               
+        else:
             return img.transpose(b+1,b+2)
 
 def pixel_shuffle_down_sampling(x:torch.Tensor, f:int, pad:int=0, pad_value:float=0.):
@@ -121,7 +124,7 @@ def pixel_shuffle_up_sampling(x:torch.Tensor, f:int, pad:int=0):
         c,w,h = x.shape
         before_shuffle = x.view(c,f,w//f,f,h//f).permute(0,1,3,2,4).reshape(c*f*f,w//f,h//f)
         if pad != 0: before_shuffle = before_shuffle[..., pad:-pad, pad:-pad]
-        return F.pixel_shuffle(before_shuffle, f)   
+        return F.pixel_shuffle(before_shuffle, f)
     # batched image tensor
     else:
         b,c,w,h = x.shape
@@ -152,11 +155,13 @@ def psnr(img1, img2):
     if isinstance(img2, torch.Tensor):
         img2 = tensor2np(img2)
 
-    # numpy value cliping & chnage type to uint8
-    img1 = np.clip(img1, 0, 255)
-    img2 = np.clip(img2, 0, 255)
+    data_range = 1.0 if max(float(np.max(img1)), float(np.max(img2))) <= 1.0 else (65535.0 if max(float(np.max(img1)), float(np.max(img2))) > 255.0 else 255.0)
 
-    return peak_signal_noise_ratio(img1, img2, data_range=255)
+    # numpy value cliping & chnage type to uint8
+    img1 = np.clip(img1, 0, data_range)
+    img2 = np.clip(img2, 0, data_range)
+
+    return peak_signal_noise_ratio(img1, img2, data_range=data_range)
 
 def ssim(img1, img2):
     '''
@@ -174,12 +179,13 @@ def ssim(img1, img2):
     if isinstance(img2, torch.Tensor):
         img2 = tensor2np(img2)
 
-    # numpy value cliping
-    img2 = np.clip(img2, 0, 255)
-    img1 = np.clip(img1, 0, 255)
+    data_range = 1.0 if max(float(np.max(img1)), float(np.max(img2))) <= 1.0 else (65535.0 if max(float(np.max(img1)), float(np.max(img2))) > 255.0 else 255.0)
 
-    # https://forum.image.sc/t/how-to-calculate-ssim-of-muti-channel-images-since-the-function-structural-similarity-deprecate-the-parameter-multichannel/79693
-    return structural_similarity(img1, img2, channel_axis=-1, multichannel=True, data_range=255)
+    # numpy value cliping
+    img2 = np.clip(img2, 0, data_range)
+    img1 = np.clip(img1, 0, data_range)
+
+    return structural_similarity(img1, img2, multichannel=True, data_range=data_range)
 
 def get_gaussian_2d_filter(window_size, sigma, channel=1, device=torch.device('cpu')):
     '''

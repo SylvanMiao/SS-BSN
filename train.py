@@ -1,13 +1,15 @@
 import argparse, os
 from importlib import import_module
 
+import torch
+
 from src.util.config_parse import ConfigParser
 from src.trainer import get_trainer_class
+
 
 def main():
     # parsing configuration
     args = argparse.ArgumentParser()
-    args.add_argument('-gr', '--group_name', default=None,  type=str)
     args.add_argument('-s', '--session_name', default=None,  type=str)
     args.add_argument('-c', '--config',       default=None,  type=str)
     args.add_argument('-r', '--resume',       action='store_true')
@@ -22,9 +24,14 @@ def main():
 
     cfg = ConfigParser(args)
 
+    # device setting
+    if cfg.get('gpu') is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = cfg.get('gpu')
+
     # intialize trainer
     trainer = get_trainer_class(cfg['trainer'])(cfg)
-    trainer.set_device(args.gpu)
+
+    # train
     trainer.train()
 
 

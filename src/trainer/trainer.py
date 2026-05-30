@@ -15,9 +15,9 @@ class Trainer(BaseTrainer):
 
     @torch.no_grad()
     def test(self):
-        ''' initialization test setting '''        
+        ''' initialization test setting '''
         # initialization
-        dataset_load = (self.cfg['test_img'] is None) and (self.cfg['test_dir'] is None)
+        dataset_load = (self.cfg.get('test_img') is None) and (self.cfg.get('test_dir') is None)
         self._before_test(dataset_load=dataset_load)
 
         # set image save path
@@ -27,12 +27,12 @@ class Trainer(BaseTrainer):
             if not self.file_manager.is_dir_exist(img_save_path): break
 
         # -- [ TEST Single Image ] -- #
-        if self.cfg['test_img'] is not None:
-            self.test_img(self.cfg['test_img'])
+        if self.cfg.get('test_img') is not None:
+            self.test_img(self.cfg.get('test_img'))
             exit()
         # -- [ TEST Image Directory ] -- #
-        elif self.cfg['test_dir'] is not None:
-            self.test_dir(self.cfg['test_dir'])
+        elif self.cfg.get('test_dir') is not None:
+            self.test_dir(self.cfg.get('test_dir'))
             exit()
         # -- [ TEST DND Benchmark ] -- #
         elif self.test_cfg['dataset'] == 'DND_benchmark':
@@ -40,11 +40,12 @@ class Trainer(BaseTrainer):
             exit()
         # -- [ Test Normal Dataset ] -- #
         else:
-            psnr, ssim = self.test_dataloader_process(  dataloader    = self.test_dataloader['dataset'], 
-                                                        add_con       = 0.  if not 'add_con' in self.test_cfg else self.test_cfg['add_con'], 
+            psnr, ssim = self.test_dataloader_process(  dataloader    = self.test_dataloader['dataset'],
+                                                        add_con       = 0.  if not 'add_con' in self.test_cfg else self.test_cfg['add_con'],
                                                         floor         = False if not 'floor' in self.test_cfg else self.test_cfg['floor'],
-                                                        img_save_path = img_save_path, 
-                                                        img_save      = self.test_cfg['save_image'])
+                                                        img_save_path = img_save_path,
+                                                        img_save      = self.test_cfg['save_image'],
+                                                        norm_factor   = self.test_cfg.get('norm_factor', 1.0))
             # print out result as filename
             if psnr is not None and ssim is not None:
                 with open(os.path.join(self.file_manager.get_dir(img_save_path), '_psnr-%.2f_ssim-%.3f.result'%(psnr, ssim)), 'w') as f:
@@ -55,6 +56,11 @@ class Trainer(BaseTrainer):
         # set denoiser
         self._set_denoiser()
 
+        # wrapping denoiser w/ crop test (SSBlock attention O(N²) memory on large images)
+        if 'crop' in self.val_cfg:
+            denoiser_fn = self.denoiser
+            self.denoiser = lambda *input_data: self.crop_test(denoiser_fn, *input_data, size=self.val_cfg['crop'])
+
         # make directories for image saving
         img_save_path = 'img/val_%03d' % self.epoch
         self.file_manager.make_dir(img_save_path)
@@ -62,24 +68,25 @@ class Trainer(BaseTrainer):
         # validation
         psnr, ssim = self.test_dataloader_process(  dataloader    = self.val_dataloader['dataset'],
                                                     add_con       = 0.  if not 'add_con' in self.val_cfg else self.val_cfg['add_con'],
-                                                    floor         = False if not 'floor' in self.val_cfg else self.val_cfg['floor'],                                                    
+                                                    floor         = False if not 'floor' in self.val_cfg else self.val_cfg['floor'],
                                                     img_save_path = img_save_path,
-                                                    img_save      = self.val_cfg['save_image'])
+                                                    img_save      = self.val_cfg['save_image'],
+                                                    norm_factor   = self.val_cfg.get('norm_factor', 1.0))
 
     def _set_module(self):
         module = {}
         if self.cfg['model']['kwargs'] is None:
             module['denoiser'] = get_model_class(self.cfg['model']['type'])()
-        else:   
+        else:
             module['denoiser'] = get_model_class(self.cfg['model']['type'])(**self.cfg['model']['kwargs'])
 
         return module
-        
+
     def _set_optimizer(self):
         optimizer = {}
         for key in self.module:
-            optimizer[key] = self._set_one_optimizer(opt        = self.train_cfg['optimizer'], 
-                                                     parameters = self.module[key].parameters(), 
+            optimizer[key] = self._set_one_optimizer(opt        = self.train_cfg['optimizer'],
+                                                     parameters = self.module[key].parameters(),
                                                      lr         = float(self.train_cfg['init_lr']))
         return optimizer
 
@@ -94,4 +101,3 @@ class Trainer(BaseTrainer):
                                     ratio=(self.epoch-1 + (self.iter-1)/self.max_iter)/self.max_epoch)
 
         return losses, tmp_info
-        
