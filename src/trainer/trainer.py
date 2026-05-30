@@ -53,6 +53,13 @@ class Trainer(BaseTrainer):
 
     @torch.no_grad()
     def validation(self):
+        # temporarily convert model to half/bf16 precision for memory-efficient validation
+        # (nn.Module._apply replaces param.data in-place, so optimizer references stay valid)
+        dtype = self._get_dtype()
+        if dtype != torch.float32:
+            for key in self.model:
+                self.model[key] = self.model[key].to(dtype)
+
         # set denoiser
         self._set_denoiser()
 
@@ -72,6 +79,11 @@ class Trainer(BaseTrainer):
                                                     img_save_path = img_save_path,
                                                     img_save      = self.val_cfg['save_image'],
                                                     norm_factor   = self.val_cfg.get('norm_factor', 1.0))
+
+        # restore model to FP32 for continued training
+        if dtype != torch.float32:
+            for key in self.model:
+                self.model[key] = self.model[key].to(torch.float32)
 
     def _set_module(self):
         module = {}

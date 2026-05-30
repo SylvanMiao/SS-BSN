@@ -11,7 +11,7 @@ model:
     in_ch: 1
     bsn_base_ch: 128
     bsn_num_module: 9
-    mode: [na, na, na, na, na, na, ss, ss, ss]
+    mode: [na, na, na, na, na, na, na, ss, ss]
     f_scale: 2
     ss_exp_factor: 1
 
@@ -30,20 +30,20 @@ training:
 
   dataset_args:
     add_noise: None
-    crop_size: [128, 128]  # must be divisible by pd_a 
+    crop_size: [256, 256]  # must be divisible by pd_a 
     aug: ['hflip', 'rot']
-    n_repeat: 1
+    n_repeat: 4
 
   batch_size: 4
 
-  max_epoch: 20
+  max_epoch: 100
 
-  init_lr: 1e-4
+  init_lr: 2e-4
   scheduler:
     type: step
     step:
-      step_size: 16
-      gamma: 0.1
+      step_size: 15
+      gamma: 0.5
   loss: 1*self_L1
   tmp_info: []
   optimizer:
@@ -65,7 +65,7 @@ validation:
   norm_factor: 65535.0
   add_con: 0.5
   floor: True
-  crop: 128       # SSBlock attention O(N²) — tile large images to avoid OOM
+  # crop: 256       # SSBlock attention O(N²) — tile large images to avoid OOM
   
   val: True
   save_image: True

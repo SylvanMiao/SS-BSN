@@ -64,6 +64,9 @@ class BaseTrainer():
         self.test_cfg  = cfg['test']
         self.ckpt_cfg  = cfg['checkpoint']
 
+        # precision: fp32 | fp16 | bf16  (fp16 halves GPU memory — helps avoid OOM on large images)
+        self.precision = cfg.get('precision', 'fp32')
+
         self.setup_determinism()
 
     def setup_determinism(self, seed=7777):
@@ -72,6 +75,27 @@ class BaseTrainer():
         torch.manual_seed(seed)
         np.random.seed(seed)
         random.seed(seed)
+
+    def _get_dtype(self):
+        """Return torch dtype for the configured precision."""
+        if self.precision == 'fp16':
+            return torch.float16
+        elif self.precision == 'bf16':
+            return torch.bfloat16
+        else:
+            return torch.float32
+
+    def _convert_to_precision(self):
+        """Convert all models to the configured inference precision (call after .cuda())."""
+        dtype = self._get_dtype()
+        if dtype == torch.float32:
+            return
+        for key in self.model:
+            self.model[key] = self.model[key].to(dtype)
+
+    def _get_model_dtype(self):
+        """Return the actual dtype of the model parameters (e.g. fp16 after conversion)."""
+        return next(self.model['denoiser'].parameters()).dtype
 
     def _log_configs(self, config, prefix=""):
         for key, value in config.items():
@@ -138,6 +162,9 @@ class BaseTrainer():
             self.model = {key: nn.DataParallel(self.module[key]).cuda() for key in self.module}
         else:
             self.model = {key: nn.DataParallel(self.module[key]) for key in self.module}
+
+        # convert to half/bf16 precision (reduces GPU memory ~50%, helps avoid OOM)
+        self._convert_to_precision()
 
         # evaluation mode and set status
         self._eval_mode()
@@ -260,6 +287,8 @@ class BaseTrainer():
         if self.val_cfg['val']:
             if self.epoch >= self.val_cfg['start_epoch'] and self.val_cfg['val']:
                 if (self.epoch-self.val_cfg['start_epoch']) % self.val_cfg['interval_epoch'] == 0:
+                    # release cached GPU memory from training before validation
+                    torch.cuda.empty_cache()
                     self._eval_mode()
                     self._set_status('val %03d'%self.epoch)
                     self.validation()
@@ -348,12 +377,19 @@ class BaseTrainer():
         psnr_sum = 0.
         ssim_sum = 0.
         count = 0
+        model_dtype = self._get_model_dtype()
         for idx, data in enumerate(dataloader):
             # to device
             if self.cfg.get('gpu') != 'None':
                 for key in data:
                     if isinstance(data[key], torch.Tensor):
                         data[key] = data[key].cuda()
+
+            # convert input tensors to match model precision (fp16/bf16 saves GPU memory)
+            if model_dtype != torch.float32:
+                for key in data:
+                    if isinstance(data[key], torch.Tensor):
+                        data[key] = data[key].to(model_dtype)
 
             # per-image normalization factor (from dataset _load_data), force to Python float
             img_norm_factor = float(data.get('norm_factor', norm_factor))
@@ -461,6 +497,11 @@ class BaseTrainer():
         if self.cfg.get('gpu') != 'None':
             noisy = noisy.cuda()
 
+        # convert to model precision (fp16/bf16 saves GPU memory)
+        model_dtype = self._get_model_dtype()
+        if model_dtype != torch.float32:
+            noisy = noisy.to(model_dtype)
+
         # forward
         denoised = self.denoiser(noisy)
 
@@ -519,6 +560,11 @@ class BaseTrainer():
             noisy = self.test_dataloader['dataset'].dataset._pre_processing({'real_noisy': noisy})['real_noisy']
 
             noisy = noisy.view(1,noisy.shape[0], noisy.shape[1], noisy.shape[2])
+
+            # convert to model precision (fp16/bf16 saves GPU memory)
+            model_dtype = self._get_model_dtype()
+            if model_dtype != torch.float32:
+                noisy = noisy.to(model_dtype)
 
             denoised = self.denoiser(noisy)
 

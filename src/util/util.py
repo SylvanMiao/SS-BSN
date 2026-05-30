@@ -28,7 +28,7 @@ def tensor2np(t:torch.Tensor):
     gray: (h,w) or (1,h,w) -> (h,w) or (h,w,1)
     RGB -> BGR: (c,h,w) -> (h,w,c)
     '''
-    t = t.cpu().detach()
+    t = t.cpu().detach().float()  # .float() handles bf16/fp16 tensors that numpy can't consume
 
     # gray (h,w)
     if len(t.shape) == 2:

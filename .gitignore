@@ -137,3 +137,7 @@ ckpt/*
 
 # output
 output/*
+
+test_origin
+
+CHANGES.md
